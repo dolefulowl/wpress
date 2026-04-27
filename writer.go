@@ -25,150 +25,103 @@
 package wpress
 
 import (
-	"io/ioutil"
 	"os"
 )
 
-// Writer structure
+// Writer writes .wpress archives in v1 format.
 type Writer struct {
 	Filename   string
 	File       *os.File
 	FilesAdded int
 }
 
-// NewWriter creates new Writer instance
+// NewWriter creates a new Writer instance.
 func NewWriter(filename string) (*Writer, error) {
-	// create a new instance of Writer
-	w := &Writer{filename, nil, 0}
-
-	// call the constructor
-	err := w.Init()
-	if err != nil {
+	w := &Writer{Filename: filename}
+	if err := w.Init(); err != nil {
 		return nil, err
 	}
-
-	// return Writer instance
 	return w, nil
 }
 
-// Init is Writer constructor
+// Init creates the archive file on disk.
 func (w *Writer) Init() error {
-	// try to create the file
 	file, err := os.Create(w.Filename)
 	if err != nil {
 		return err
 	}
-
-	// file was created, assign it to its holding variable
 	w.File = file
-
 	return nil
 }
 
-// AddFile addd a file to the archive
+// AddFile appends a single file to the archive.
 func (w *Writer) AddFile(filename string) error {
-	// populate header block from the filename passed
 	h := &Header{}
-	err := h.PopulateFromFilename(filename)
-	if err != nil {
+	if err := h.PopulateFromFilename(filename); err != nil {
 		return err
 	}
 
-	// write header block
-	_, err = w.File.Write(h.GetHeaderBlock())
-	if err != nil {
+	if _, err := w.File.Write(h.GetHeaderBlock()); err != nil {
 		return err
 	}
-	// write file content
-	// open the file for reading
+
 	input, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
+	defer input.Close()
 
+	buf := make([]byte, 512)
 	for {
-		bytesToRead := 512
-		content := make([]byte, bytesToRead)
-		bytesRead, err := input.Read(content)
-		if err != nil {
-			return err
-		}
-
-		// if we have read less than 100 or 0 bytes, we reached end of file
-		if bytesRead < bytesToRead {
-			// obtain only the bytes that were read
-			contentRead := content[0:bytesRead]
-			_, err = w.File.Write(contentRead)
-			if err != nil {
-				return err
+		n, err := input.Read(buf)
+		if n > 0 {
+			if _, werr := w.File.Write(buf[:n]); werr != nil {
+				return werr
 			}
-
-			// exit the loop, we reached end of file
-			break
 		}
-
-		// we write the content we just read to the archive
-		_, err = w.File.Write(content)
 		if err != nil {
+			if err.Error() == "EOF" {
+				break
+			}
 			return err
 		}
 	}
 
-	// done reading from the file, let's close it
-	err = input.Close()
-	if err != nil {
-		return err
-	}
-
-	// file was added to the archive, increment fileAdded
 	w.FilesAdded++
-
 	return nil
 }
 
-// AddDirectory adds a directory to the archive
-func (w *Writer) AddDirectory(path string) error {
-	fiArray, err := ioutil.ReadDir(path)
+// AddDirectory recursively adds all files in a directory to the archive.
+func (w *Writer) AddDirectory(dirPath string) error {
+	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return err
 	}
 
-	// go over every directory entry and add it
-	// files are added using AddFile, directories are parsed recursevely
-	for _, fi := range fiArray {
-		if fi.IsDir() {
-			w.AddDirectory(path + string(os.PathSeparator) + fi.Name())
+	for _, entry := range entries {
+		fullPath := dirPath + string(os.PathSeparator) + entry.Name()
+		if entry.IsDir() {
+			if err := w.AddDirectory(fullPath); err != nil {
+				return err
+			}
 		} else {
-			err = w.AddFile(path + string(os.PathSeparator) + fi.Name())
-			if err != nil {
+			if err := w.AddFile(fullPath); err != nil {
 				return err
 			}
 		}
 	}
-
 	return nil
 }
 
-// Close appends EOF sequence to the end of the file and closes the file
+// Close appends the EOF marker and closes the archive.
+// No EOF marker is written if no files were added.
 func (w Writer) Close() error {
-	// if we haven't added any files, we don't append EOF sequence
 	if w.FilesAdded == 0 {
 		return nil
 	}
-	// create new header instance
 	h := &Header{}
-
-	// write eof sequence
-	_, err := w.File.Write(h.GetEOFBlock())
-	if err != nil {
+	if _, err := w.File.Write(h.GetEOFBlock()); err != nil {
 		return err
 	}
-
-	// close the archive
-	err = w.File.Close()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return w.File.Close()
 }

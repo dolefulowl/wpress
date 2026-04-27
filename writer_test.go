@@ -25,9 +25,7 @@
 package wpress
 
 import (
-	"bytes"
 	"io"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"testing"
@@ -73,7 +71,7 @@ func TestAddFile(t *testing.T) {
 	path := _getPathToTests(t)
 
 	// create a temporary folder for our tests
-	tempPath, err := ioutil.TempDir(cwd, "wpressTest")
+	tempPath, err := os.MkdirTemp(cwd, "wpressTest")
 	if err != nil {
 		t.Errorf("Failed to create temporary folder %s", err)
 	}
@@ -137,7 +135,7 @@ func TestAddDirectory(t *testing.T) {
 	path := _getPathToTests(t)
 
 	// create a temporary folder for our tests
-	tempPath, err := ioutil.TempDir(cwd, "wpressTest")
+	tempPath, err := os.MkdirTemp(cwd, "wpressTest")
 	if err != nil {
 		t.Errorf("Failed to create temporary folder %s", err)
 	}
@@ -190,7 +188,7 @@ func TestClose(t *testing.T) {
 	path := _getPathToTests(t)
 
 	// create a temporary folder for our tests
-	tempPath, err := ioutil.TempDir(cwd, "wpressTest")
+	tempPath, err := os.MkdirTemp(cwd, "wpressTest")
 	if err != nil {
 		t.Errorf("Failed to create temporary folder %s", err)
 	}
@@ -230,7 +228,6 @@ func TestClose(t *testing.T) {
 	if err != nil {
 		t.Errorf("Unable to open archive for reading: %s", err)
 	}
-	h := &Header{}
 	data = make([]byte, headerSize)
 	_, err = file.Seek(-headerSize, 2)
 	if err != nil {
@@ -241,7 +238,7 @@ func TestClose(t *testing.T) {
 		t.Errorf("Unable to read from the archive: %s", err)
 	}
 
-	if bytes.Compare(data, h.GetEOFBlock()) != 0 {
+	if !IsEOFBlock(data) {
 		t.Errorf("EOF sequence was not found at the end of the file")
 	}
 }

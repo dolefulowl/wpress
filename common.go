@@ -29,104 +29,111 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 )
 
 const (
-	headerSize   = 4377 // length of the header
-	filenameSize = 255  // maximum number of bytes allowed for filename
-	contentSize  = 14   // maximum number of bytes allowed for content size
-	mtimeSize    = 12   // maximum number of bytes allowed for last modified date
-	prefixSize   = 4096 // maximum number of bytes allowed  for prefix
+	headerSize   = 4377 // total length of a header block
+	filenameSize = 255  // max bytes for filename
+	contentSize  = 14   // max bytes for file size field
+	mtimeSize    = 12   // max bytes for last modified date
+	prefixSize   = 4096 // max bytes for path prefix (v1)
+
+	// v2 field layout within the header block:
+	//   [0:255]    filename        (255 bytes, null-terminated)
+	//   [255:269]  size            (14 bytes,  null-terminated)
+	//   [269:281]  mtime           (12 bytes,  null-terminated)
+	//   [281:4369] path prefix     (4088 bytes, null-terminated)
+	//   [4369:4377] crc32          (8 bytes,   hex ASCII, no null terminator)
+	prefixSizeV2 = 4088 // max bytes for path prefix in v2
+	crc32Size    = 8    // bytes reserved for CRC32 hex string in v2
 )
 
-// Header block format of a file
-// Field Name    Offset    Length    Contents
-// Name               0       255    filename (no path, no slash)
-// Size             255        14    length of file contents
-// Mtime            269        12    last modification date
-// Prefix           281      4096    path name, no trailing slashes
+var hexPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}$`)
+
+// Header represents the metadata block that precedes each file in a .wpress archive.
+//
+// v1 layout (4377 bytes):
+//
+//	Name   [0:255]    filename, null-padded
+//	Size   [255:269]  decimal file size, null-padded
+//	Mtime  [269:281]  unix timestamp string, null-padded
+//	Prefix [281:4377] directory path, null-padded (4096 bytes)
+//
+// v2 layout (4377 bytes):
+//
+//	Name   [0:255]    filename, null-padded
+//	Size   [255:269]  decimal file size, null-padded
+//	Mtime  [269:281]  unix timestamp string, null-padded
+//	Prefix [281:4369] directory path, null-padded (4088 bytes)
+//	Crc32  [4369:4377] CRC32 hex string (8 ASCII bytes)
 type Header struct {
 	Name   []byte
 	Size   []byte
 	Mtime  []byte
 	Prefix []byte
+	Crc32  []byte // nil for v1; 8-byte hex ASCII for v2
 }
 
-// PopulateFromBytes populates header struct from bytes array
-func (h *Header) PopulateFromBytes(block []byte) {
+// PopulateFromBytes populates the header from a raw 4377-byte block.
+// Pass isV2=true to parse the v2 layout (shorter Prefix + Crc32 field).
+func (h *Header) PopulateFromBytes(block []byte, isV2 bool) {
 	h.Name = block[0:255]
 	h.Size = block[255:269]
 	h.Mtime = block[269:281]
-	h.Prefix = block[281:4377]
+	if isV2 {
+		h.Prefix = block[281:4369]
+		h.Crc32 = block[4369:4377]
+	} else {
+		h.Prefix = block[281:4377]
+		h.Crc32 = nil
+	}
 }
 
-// PopulateFromFilename populates header struct from passed filename
+// PopulateFromFilename populates the header from a file on disk (v1 format).
 func (h *Header) PopulateFromFilename(filename string) error {
-
-	// try to open the file
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
-
-	// get the fileinfo
 	fi, err := file.Stat()
 	if err != nil {
 		return err
 	}
+	file.Close()
 
-	// validate if filename fits the allowed length
 	if len(fi.Name()) > filenameSize {
 		return errors.New("filename is longer than max allowed")
 	}
-	// create filename buffer
 	h.Name = make([]byte, filenameSize)
-	// copy filename to the buffer leaving available space as zero-bytes
 	copy(h.Name, fi.Name())
 
-	// get filesize as string
 	size := strconv.FormatInt(fi.Size(), 10)
-	// validate if filesize fits the allowed length
 	if len(size) > contentSize {
 		return errors.New("file size is larger than max allowed")
 	}
-	// create size buffer
 	h.Size = make([]byte, contentSize)
-	// copy content size length to the buffer
 	copy(h.Size, size)
 
-	// get last modified date as string
 	unixTime := strconv.FormatInt(fi.ModTime().Unix(), 10)
 	if len(unixTime) > mtimeSize {
-		return errors.New("last modified date is after than max allowed")
+		return errors.New("last modified date is after max allowed")
 	}
-	// create mtime buffer
 	h.Mtime = make([]byte, mtimeSize)
-	// copy mtime to the buffer
 	copy(h.Mtime, unixTime)
 
-	// get the path to the file
 	_path := filepath.Dir(filename)
-	// validate if path fits the allowed length
 	if len(_path) > prefixSize {
 		return errors.New("prefix size is longer than max allowed")
 	}
-	// create buffer to put the prefix in
 	h.Prefix = make([]byte, prefixSize)
-	// put the prefix in the buffer
 	copy(h.Prefix, _path)
-
-	// close the file
-	err = file.Close()
-	if err != nil {
-		return err
-	}
 
 	return nil
 }
 
-// GetHeaderBlock returns byte sequence of header block populated with data
+// GetHeaderBlock serialises the header to bytes (always v1 format).
 func (h Header) GetHeaderBlock() []byte {
 	block := append(h.Name, h.Size...)
 	block = append(block, h.Mtime...)
@@ -134,14 +141,45 @@ func (h Header) GetHeaderBlock() []byte {
 	return block
 }
 
-// GetSize returns content size
+// GetSize returns the file content size stored in the header.
 func (h Header) GetSize() (int, error) {
-	// remove any trailing zero bytes, convert to string, then convert to integer
 	return strconv.Atoi(string(bytes.Trim(h.Size, "\x00")))
 }
 
-// GetEOFBlock returns byte sequence describing EOF
+// GetEOFBlock returns a v1 EOF marker: 4377 zero bytes.
 func (h Header) GetEOFBlock() []byte {
-	// generate zero-byte sequence of length headerSize
 	return bytes.Repeat([]byte("\x00"), headerSize)
+}
+
+// IsEOFBlock reports whether block is a valid EOF marker (v1 or v2).
+func IsEOFBlock(block []byte) bool {
+	if len(block) != headerSize {
+		return false
+	}
+	if IsV2EOFBlock(block) {
+		return true
+	}
+	return bytes.Equal(block, bytes.Repeat([]byte("\x00"), headerSize))
+}
+
+// IsV2EOFBlock reports whether block is a v2 EOF marker.
+//
+// v2 EOF structure:
+//
+//	[0:255]    all zero        (empty filename signals EOF)
+//	[255:269]  non-empty size  (archive-level CRC payload size)
+//	[269:4369] arbitrary
+//	[4369:4377] 8 hex digits   (CRC32 of all data before the EOF block)
+func IsV2EOFBlock(block []byte) bool {
+	if len(block) != headerSize {
+		return false
+	}
+	if !bytes.Equal(block[0:255], bytes.Repeat([]byte("\x00"), 255)) {
+		return false
+	}
+	sizeField := string(bytes.Trim(block[255:269], "\x00"))
+	if sizeField == "" {
+		return false
+	}
+	return hexPattern.MatchString(string(block[4369:4377]))
 }
